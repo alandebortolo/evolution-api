@@ -133,6 +133,8 @@ import makeWASocket, {
   WAMediaUpload,
   WAMessage,
   WAMessageKey,
+  USyncQuery,
+  USyncUser,
   WAPresence,
   WASocket,
 } from 'baileys';
@@ -4153,6 +4155,38 @@ export class BaileysStartupService extends ChannelStartupService {
 
     // Combine results
     onWhatsapp.push(...verifiedUsers);
+
+    // [trainerconnect] Enrich verified numbers with their real LID via the
+    // USync LID protocol. LID-migrated accounts silently reject messages
+    // addressed to the PN jid (ack error 463) — callers need the LID to
+    // deliver. Upstream discards it; baileys exposes executeUSyncQuery.
+    try {
+      const pnJids = onWhatsapp
+        .filter((user) => user.exists && user.jid.includes('@s.whatsapp.net') && (!user.lid || user.lid === 'lid'))
+        .map((user) => user.jid);
+      if (pnJids.length > 0) {
+        let lidQuery = new USyncQuery().withLIDProtocol().withContext('background');
+        for (const jid of pnJids) {
+          lidQuery = lidQuery.withUser(new USyncUser().withId(jid));
+        }
+        const lidResults = await this.client.executeUSyncQuery(lidQuery);
+        const lidByJid = new Map<string, string>();
+        for (const entry of lidResults?.list || []) {
+          if (entry?.id && (entry as any)?.lid) {
+            lidByJid.set(String(entry.id), String((entry as any).lid));
+          }
+        }
+        for (const user of onWhatsapp) {
+          const realLid = lidByJid.get(user.jid);
+          if (realLid) {
+            (user as any).lid = realLid;
+          }
+        }
+        this.logger.verbose(`[trainerconnect] LID enrichment resolved ${lidByJid.size}/${pnJids.length} numbers`);
+      }
+    } catch (error) {
+      this.logger.warn(`[trainerconnect] LID enrichment failed: ${String(error)}`);
+    }
 
     // TODO: Salvar no cache apenas números que NÃO estavam no cache
     const numbersToCache = onWhatsapp.filter((user) => {
